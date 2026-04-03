@@ -14,6 +14,10 @@ Firewall: allow inbound TCP 7000 on Private profile.
 """
 
 import logging
+from pathlib import Path
+
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from flask import Flask, jsonify, request
 

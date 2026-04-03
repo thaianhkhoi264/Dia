@@ -1,5 +1,4 @@
 flask
-keyboard
-pycaw
-comtypes
+spotipy
+python-dotenv
 requests

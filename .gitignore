@@ -2,6 +2,7 @@
 
 # Sensitive config — never commit
 .env
+pc/.spotify_cache
 
 # Python
 __pycache__/
