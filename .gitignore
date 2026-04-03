@@ -1,1 +1,11 @@
 .claude/*
+
+# Sensitive config — never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
