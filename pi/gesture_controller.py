@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import logging
+import sys
 
 import gi
 gi.require_version("Gst", "1.0")
@@ -142,6 +143,11 @@ def main():
     )
     args, _unknown = parser.parse_known_args()
     DEBUG_KEYPOINTS = args.debug_keypoints
+
+    # Remove our flag from sys.argv so GStreamerPoseEstimationApp's
+    # own argparser doesn't choke on it.
+    if "--debug-keypoints" in sys.argv:
+        sys.argv.remove("--debug-keypoints")
 
     if DEBUG_KEYPOINTS:
         logger.info("Debug-keypoints mode — gestures will NOT fire")
