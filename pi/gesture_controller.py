@@ -32,8 +32,9 @@ import numpy as np
 
 import config
 
-# Add blaze_app_python to import path so blaze_hailo and blazebase are importable
+# Add blaze_app_python and blaze_common to import path
 sys.path.insert(0, config.BLAZE_APP_PATH)
+sys.path.insert(0, os.path.join(config.BLAZE_APP_PATH, "blaze_common"))
 
 try:
     from blaze_hailo.hailo_inference import HailoInference
