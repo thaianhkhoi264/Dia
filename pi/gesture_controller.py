@@ -23,6 +23,7 @@ Prerequisites on Pi (one-time):
 
 import argparse
 import logging
+import os
 import sys
 import time
 import threading
