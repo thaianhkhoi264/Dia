@@ -8,7 +8,6 @@
 #   DIA_PC_MAC=AA:BB:CC:DD:EE:FF
 #
 # See .env.example for the template.
-# All other values below are safe to commit and tune as needed.
 # =============================================================================
 
 import os
@@ -33,9 +32,20 @@ if not PC_IP or not PC_MAC:
         "Copy .env.example to .env and fill in the values."
     )
 
-# --- Detection confidence thresholds -----------------------------------------
-KEYPOINT_CONFIDENCE_THRESHOLD = 0.4   # ignore individual keypoints below this
-PERSON_CONFIDENCE_THRESHOLD   = 0.3   # ignore person detections below this
+# --- Blaze hand detection ----------------------------------------------------
+# Path to the cloned blaze_app_python repo on the Pi.
+# Clone it with: git clone https://github.com/AlbertaBeef/blaze_app_python.git ~/blaze_app_python
+BLAZE_APP_PATH = os.path.expanduser("~/blaze_app_python")
+
+# HEF model paths (relative to BLAZE_APP_PATH)
+PALM_HEF_PATH     = os.path.join(BLAZE_APP_PATH, "blaze_hailo/models/palm_detection_lite.hef")
+LANDMARK_HEF_PATH = os.path.join(BLAZE_APP_PATH, "blaze_hailo/models/hand_landmark_lite.hef")
+
+# Palm detection confidence threshold (0–1). Lower = more detections but more false positives.
+PALM_CONFIDENCE_THRESHOLD = 0.7
+
+# Webcam device index for cv2.VideoCapture
+CAMERA_INDEX = 0
 
 # --- Gesture hold durations (seconds) ----------------------------------------
 # Each gesture must be held continuously for this long before firing.

@@ -1,37 +1,49 @@
 """
-gesture_controller.py — Dia Pi-side entry point (Part 2: pipeline + debug).
+gesture_controller.py — Dia Pi-side entry point (Part 2: blaze hand detection).
 
-Runs the Hailo/GStreamer pose-estimation pipeline and extracts keypoints
-from each frame. In --debug-keypoints mode, prints them to stdout so you
-can verify detection at distance before gesture logic is added in Part 3.
+Uses MediaPipe hand landmark models (palm_detection_lite + hand_landmark_lite)
+accelerated on the Hailo-8L NPU via blaze_app_python. Camera capture via OpenCV.
+
+Pipeline per frame:
+  1. resize_pad(frame) → feed into palm_detection_lite.hef (192×192)
+  2. denormalize_detections + detection2roi → locate hand crop
+  3. extract_roi → warped 224×224 crop → hand_landmark_lite.hef
+  4. Returns (flags, landmarks[21×3], handedness)
 
 Usage:
-    source ~/hailo-rpi5-examples/setup_env.sh
-    ~/Dia/venv/bin/python ~/Dia/pi/gesture_controller.py --debug-keypoints
+    cd ~/hailo-rpi5-examples && source setup_env.sh
+    ~/hailo-rpi5-examples/venv_hailo_rpi_examples/bin/python \\
+        ~/Dia/pi/gesture_controller.py --debug-keypoints
+
+Prerequisites on Pi (one-time):
+    git clone https://github.com/AlbertaBeef/blaze_app_python.git ~/blaze_app_python
+    cd ~/blaze_app_python/blaze_hailo/models
+    source ./get_hailo8l_models.sh && unzip -o blaze_hailo8l_models.zip && cp hailo8l/*.hef .
 """
 
 import argparse
 import logging
 import sys
+import time
+import threading
 
-import gi
-gi.require_version("Gst", "1.0")
-from gi.repository import Gst
-
-import hailo
-
-# Compatibility shim — supports both old and new hailo-apps-infra layouts
-try:
-    from hailo_apps_infra.pose_estimation_pipeline import GStreamerPoseEstimationApp
-    from hailo_apps_infra.hailo_rpi_common import get_caps_from_pad, app_callback_class
-except ImportError:
-    from hailo_apps.hailo_app_python.apps.pose_estimation.pose_estimation_pipeline import (
-        GStreamerPoseEstimationApp,
-    )
-    from hailo_apps.hailo_app_python.core.gstreamer.gstreamer_app import app_callback_class
-    from hailo_apps.hailo_app_python.core.common.buffer_utils import get_caps_from_pad
+import cv2
+import numpy as np
 
 import config
+
+# Add blaze_app_python to import path so blaze_hailo and blazebase are importable
+sys.path.insert(0, config.BLAZE_APP_PATH)
+
+try:
+    from blaze_hailo.hailo_inference import HailoInference
+    from blaze_hailo.blazedetector import BlazeDetector
+    from blaze_hailo.blazelandmark import BlazeLandmark
+except ImportError as e:
+    print(f"ERROR: Could not import blaze_hailo: {e}")
+    print(f"  Expected repo at: {config.BLAZE_APP_PATH}")
+    print("  Run: git clone https://github.com/AlbertaBeef/blaze_app_python.git ~/blaze_app_python")
+    sys.exit(1)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,95 +52,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Set by --debug-keypoints flag
+# ---------------------------------------------------------------------------
+# Shared state — written by capture loop, read by gesture thread (Part 3)
+# ---------------------------------------------------------------------------
+shared_state: dict = {"landmarks": None, "handedness": None, "timestamp": 0.0}
+state_lock = threading.Lock()
+
 DEBUG_KEYPOINTS = False
 
-# COCO keypoint names (index = position in landmarks list)
-_KP_NAMES = [
-    "nose",          # 0
-    "left_eye",      # 1
-    "right_eye",     # 2
-    "left_ear",      # 3
-    "right_ear",     # 4
-    "left_shoulder", # 5  ← person's left = RIGHT side of image
-    "right_shoulder",# 6  ← person's right = LEFT side of image
-    "left_elbow",    # 7
-    "right_elbow",   # 8
-    "left_wrist",    # 9
-    "right_wrist",   # 10
-    "left_hip",      # 11
-    "right_hip",     # 12
-    "left_knee",     # 13
-    "right_knee",    # 14
-    "left_ankle",    # 15
-    "right_ankle",   # 16
+# MediaPipe hand landmark names (21 points, indices match model output)
+_LM_NAMES = [
+    "wrist",                                                   # 0
+    "thumb_cmc",  "thumb_mcp",   "thumb_ip",    "thumb_tip",  # 1-4
+    "index_mcp",  "index_pip",   "index_dip",   "index_tip",  # 5-8
+    "middle_mcp", "middle_pip",  "middle_dip",  "middle_tip", # 9-12
+    "ring_mcp",   "ring_pip",    "ring_dip",    "ring_tip",   # 13-16
+    "pinky_mcp",  "pinky_pip",   "pinky_dip",   "pinky_tip",  # 17-20
 ]
 
 
-class _UserData(app_callback_class):
-    def __init__(self):
-        super().__init__()
-
-
-def app_callback(pad, info, user_data):
-    """
-    GStreamer pad-probe callback — called on every frame.
-    Extracts keypoints and prints them in debug mode.
-    """
-    buffer = info.get_buffer()
-    if buffer is None:
-        return Gst.PadProbeReturn.OK
-
-    format, width, height = get_caps_from_pad(pad)
-
-    roi        = hailo.get_roi_from_buffer(buffer)
-    detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
-
-    if not detections:
-        if DEBUG_KEYPOINTS:
-            print("  (no person detected)\n")
-        return Gst.PadProbeReturn.OK
-
-    # Use the highest-confidence detection (handles multiple people)
-    best = max(detections, key=lambda d: d.get_confidence())
-
-    if best.get_confidence() < config.PERSON_CONFIDENCE_THRESHOLD:
-        if DEBUG_KEYPOINTS:
-            print(f"  (detection below threshold: {best.get_confidence():.2f})\n")
-        return Gst.PadProbeReturn.OK
-
-    bbox      = best.get_bbox()
-    landmarks = best.get_objects_typed(hailo.HAILO_LANDMARKS)
-
-    if not landmarks:
-        return Gst.PadProbeReturn.OK
-
-    raw_points = landmarks[0].get_points()
-    keypoints  = []
-
-    for pt in raw_points:
-        conf = pt.confidence() if hasattr(pt, "confidence") else 1.0
-        if conf >= config.KEYPOINT_CONFIDENCE_THRESHOLD:
-            px = pt.x() * bbox.width()  + bbox.xmin()
-            py = pt.y() * bbox.height() + bbox.ymin()
-            keypoints.append((px, py, conf))
-        else:
-            keypoints.append(None)
-
-    if DEBUG_KEYPOINTS:
-        _print_keypoints(keypoints, best.get_confidence())
-
-    return Gst.PadProbeReturn.OK
-
-
-def _print_keypoints(keypoints, person_conf):
-    print(f"  person confidence: {person_conf:.2f}")
-    for i, kp in enumerate(keypoints):
-        name = _KP_NAMES[i] if i < len(_KP_NAMES) else f"kp{i}"
-        if kp is None:
-            print(f"  {name:>16}: (low confidence)")
-        else:
-            print(f"  {name:>16}: x={kp[0]:.3f}  y={kp[1]:.3f}  conf={kp[2]:.2f}")
+def _print_landmarks(landmarks, flags, handedness):
+    """Print all 21 landmarks to stdout for calibration/debug."""
+    hand_side = "left" if handedness > 0.5 else "right"
+    print(f"  hand: {hand_side}  landmark_confidence: {flags:.2f}")
+    for i, lm in enumerate(landmarks):
+        name = _LM_NAMES[i] if i < len(_LM_NAMES) else f"lm{i}"
+        print(f"  {name:>12}: x={lm[0]:.3f}  y={lm[1]:.3f}  z={lm[2]:.3f}")
     print()
 
 
@@ -139,26 +88,98 @@ def main():
     parser.add_argument(
         "--debug-keypoints",
         action="store_true",
-        help="Print raw keypoints each frame (no gestures fired)",
+        help="Print raw hand landmarks each frame (no gestures fired)",
     )
-    args, _unknown = parser.parse_known_args()
+    args = parser.parse_args()
     DEBUG_KEYPOINTS = args.debug_keypoints
 
-    # Remove our flag from sys.argv so GStreamerPoseEstimationApp's
-    # own argparser doesn't choke on it.
-    if "--debug-keypoints" in sys.argv:
-        sys.argv.remove("--debug-keypoints")
-
     if DEBUG_KEYPOINTS:
-        logger.info("Debug-keypoints mode — gestures will NOT fire")
-        logger.info("Raise both arms and verify wrist Y < nose Y")
-    else:
-        logger.info("No mode specified — run with --debug-keypoints for Part 2")
+        logger.info("Debug mode — printing landmarks, gestures will NOT fire")
+        logger.info("Show your hand to the camera and check the coordinates")
 
-    user_data = _UserData()
-    app = GStreamerPoseEstimationApp(app_callback, user_data)
-    logger.info("Starting GStreamer pipeline…")
-    app.run()
+    # ---------------------------------------------------------------------------
+    # Initialise Hailo inference + blaze models
+    # ---------------------------------------------------------------------------
+    logger.info("Initialising HailoInference...")
+    hailo_infer = HailoInference()
+
+    logger.info("Loading palm detector: %s", config.PALM_HEF_PATH)
+    palm_detector = BlazeDetector("blazepalm", hailo_infer)
+    palm_detector.load_model(config.PALM_HEF_PATH)
+
+    logger.info("Loading hand landmark model: %s", config.LANDMARK_HEF_PATH)
+    hand_landmark = BlazeLandmark("blazehandlandmark", hailo_infer)
+    hand_landmark.load_model(config.LANDMARK_HEF_PATH)
+
+    # ---------------------------------------------------------------------------
+    # Open webcam
+    # ---------------------------------------------------------------------------
+    cap = cv2.VideoCapture(config.CAMERA_INDEX)
+    if not cap.isOpened():
+        logger.error("Could not open camera index %d", config.CAMERA_INDEX)
+        sys.exit(1)
+    logger.info("Camera opened (index %d) — press Ctrl+C to stop", config.CAMERA_INDEX)
+
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                logger.warning("Empty frame, skipping")
+                continue
+
+            # blaze_app_python expects RGB
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+            # --- Stage 1: palm detection ------------------------------------
+            img_resized, scale, pad = palm_detector.resize_pad(frame_rgb)
+            detections = palm_detector.predict_on_image(img_resized)
+
+            if len(detections) == 0:
+                with state_lock:
+                    shared_state["landmarks"] = None
+                    shared_state["timestamp"] = time.monotonic()
+                if DEBUG_KEYPOINTS:
+                    print("  (no hand detected)\n")
+                continue
+
+            # Denormalize to frame coordinates
+            detections = palm_detector.denormalize_detections(detections, scale, pad)
+
+            # Filter by confidence (column 16)
+            best_idx  = int(np.argmax(detections[:, 16]))
+            best_conf = detections[best_idx, 16]
+
+            if best_conf < config.PALM_CONFIDENCE_THRESHOLD:
+                if DEBUG_KEYPOINTS:
+                    print(f"  (palm below threshold: {best_conf:.2f})\n")
+                continue
+
+            best_detection = detections[best_idx:best_idx+1]  # keep batch dim
+
+            # --- Stage 2: hand landmark inference ---------------------------
+            xc, yc, scale_roi, theta = palm_detector.detection2roi(best_detection)
+            roi_imgs, roi_affines, roi_points = hand_landmark.extract_roi(
+                frame_rgb, xc, yc, theta, scale_roi
+            )
+            flags, landmarks, handedness = hand_landmark.predict(roi_imgs)
+
+            # landmarks shape: (1, 21, 3) — take first item
+            lm   = landmarks[0]    # (21, 3), normalized [0, 1]
+            flag = float(flags[0])
+            hand = float(handedness[0])
+
+            with state_lock:
+                shared_state["landmarks"]  = lm
+                shared_state["handedness"] = hand
+                shared_state["timestamp"]  = time.monotonic()
+
+            if DEBUG_KEYPOINTS:
+                _print_landmarks(lm, flag, hand)
+
+    except KeyboardInterrupt:
+        logger.info("Stopped by user")
+    finally:
+        cap.release()
 
 
 if __name__ == "__main__":
