@@ -73,6 +73,43 @@ _LM_NAMES = [
 ]
 
 
+# Hand skeleton edges (pairs of landmark indices)
+_HAND_CONNECTIONS = [
+    (0, 1), (1, 2), (2, 3), (3, 4),          # thumb
+    (0, 5), (5, 6), (6, 7), (7, 8),           # index
+    (0, 9), (9, 10), (10, 11), (11, 12),      # middle
+    (0, 13), (13, 14), (14, 15), (15, 16),    # ring
+    (0, 17), (17, 18), (18, 19), (19, 20),    # pinky
+    (5, 9), (9, 13), (13, 17),                # palm knuckle bar
+]
+
+
+def _draw_landmarks(frame_bgr, landmarks, flags, handedness):
+    """Draw hand skeleton and landmark points onto a copy of the frame."""
+    out = frame_bgr.copy()
+    h, w = out.shape[:2]
+    hand_side = "left" if handedness > 0.5 else "right"
+
+    pts = [(int(lm[0] * w), int(lm[1] * h)) for lm in landmarks]
+
+    # Draw skeleton
+    for a, b in _HAND_CONNECTIONS:
+        cv2.line(out, pts[a], pts[b], (0, 200, 0), 2)
+
+    # Draw landmark dots — fingertips slightly larger
+    tips = {4, 8, 12, 16, 20}
+    for i, pt in enumerate(pts):
+        r = 6 if i in tips else 4
+        cv2.circle(out, pt, r, (0, 255, 255), -1)
+        cv2.circle(out, pt, r, (0, 0, 0), 1)
+
+    # Label wrist with hand side + confidence
+    cv2.putText(out, f"{hand_side}  conf={flags:.2f}",
+                (pts[0][0] + 8, pts[0][1] - 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    return out
+
+
 def _print_landmarks(landmarks, flags, handedness):
     """Print all 21 landmarks to stdout for calibration/debug."""
     hand_side = "left" if handedness > 0.5 else "right"
@@ -141,7 +178,9 @@ def main():
                     shared_state["landmarks"] = None
                     shared_state["timestamp"] = time.monotonic()
                 if DEBUG_KEYPOINTS:
-                    print("  (no hand detected)\n")
+                    cv2.imshow("Dia — hand landmarks", frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
                 continue
 
             # Denormalize to frame coordinates
@@ -153,7 +192,9 @@ def main():
 
             if best_conf < config.PALM_CONFIDENCE_THRESHOLD:
                 if DEBUG_KEYPOINTS:
-                    print(f"  (palm below threshold: {best_conf:.2f})\n")
+                    cv2.imshow("Dia — hand landmarks", frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
                 continue
 
             best_detection = detections[best_idx:best_idx+1]  # keep batch dim
@@ -177,11 +218,17 @@ def main():
 
             if DEBUG_KEYPOINTS:
                 _print_landmarks(lm, flag, hand)
+                preview = _draw_landmarks(frame, lm, flag, hand)
+                cv2.imshow("Dia — hand landmarks", preview)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
 
     except KeyboardInterrupt:
         logger.info("Stopped by user")
     finally:
         cap.release()
+        if DEBUG_KEYPOINTS:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
