@@ -42,7 +42,7 @@ PALM_HEF_PATH     = os.path.join(BLAZE_APP_PATH, "blaze_hailo/models/palm_detect
 LANDMARK_HEF_PATH = os.path.join(BLAZE_APP_PATH, "blaze_hailo/models/hand_landmark_lite.hef")
 
 # Palm detection confidence threshold (0–1). Lower = more detections but more false positives.
-PALM_CONFIDENCE_THRESHOLD = 0.7
+PALM_CONFIDENCE_THRESHOLD = 0.5
 
 # Webcam device index for cv2.VideoCapture
 CAMERA_INDEX = 0
