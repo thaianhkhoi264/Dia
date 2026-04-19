@@ -159,11 +159,16 @@ def main():
         sys.exit(1)
     logger.info("Camera opened (index %d) — press Ctrl+C to stop", config.CAMERA_INDEX)
 
+    if DEBUG_KEYPOINTS:
+        cv2.namedWindow("Dia - hand landmarks", cv2.WINDOW_NORMAL)
+
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 logger.warning("Empty frame, skipping")
+                if DEBUG_KEYPOINTS and cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
                 continue
 
             # blaze_app_python expects RGB
@@ -173,53 +178,48 @@ def main():
             img_resized, scale, pad = palm_detector.resize_pad(frame_rgb)
             detections = palm_detector.predict_on_image(img_resized)
 
-            if len(detections) == 0:
+            display = frame  # default: plain frame when no hand found
+
+            if len(detections) > 0:
+                # Denormalize to frame coordinates
+                detections = palm_detector.denormalize_detections(detections, scale, pad)
+
+                best_idx  = int(np.argmax(detections[:, 16]))
+                best_conf = detections[best_idx, 16]
+
+                if best_conf >= config.PALM_CONFIDENCE_THRESHOLD:
+                    best_detection = detections[best_idx:best_idx+1]
+
+                    # --- Stage 2: hand landmark inference -------------------
+                    xc, yc, scale_roi, theta = palm_detector.detection2roi(best_detection)
+                    roi_imgs, roi_affines, roi_points = hand_landmark.extract_roi(
+                        frame_rgb, xc, yc, theta, scale_roi
+                    )
+                    flags, landmarks, handedness = hand_landmark.predict(roi_imgs)
+
+                    lm   = landmarks[0]
+                    flag = float(flags[0])
+                    hand = float(handedness[0])
+
+                    with state_lock:
+                        shared_state["landmarks"]  = lm
+                        shared_state["handedness"] = hand
+                        shared_state["timestamp"]  = time.monotonic()
+
+                    if DEBUG_KEYPOINTS:
+                        _print_landmarks(lm, flag, hand)
+                        display = _draw_landmarks(frame, lm, flag, hand)
+                else:
+                    with state_lock:
+                        shared_state["landmarks"] = None
+                        shared_state["timestamp"] = time.monotonic()
+            else:
                 with state_lock:
                     shared_state["landmarks"] = None
                     shared_state["timestamp"] = time.monotonic()
-                if DEBUG_KEYPOINTS:
-                    cv2.imshow("Dia — hand landmarks", frame)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
-                continue
-
-            # Denormalize to frame coordinates
-            detections = palm_detector.denormalize_detections(detections, scale, pad)
-
-            # Filter by confidence (column 16)
-            best_idx  = int(np.argmax(detections[:, 16]))
-            best_conf = detections[best_idx, 16]
-
-            if best_conf < config.PALM_CONFIDENCE_THRESHOLD:
-                if DEBUG_KEYPOINTS:
-                    cv2.imshow("Dia — hand landmarks", frame)
-                    if cv2.waitKey(1) & 0xFF == ord("q"):
-                        break
-                continue
-
-            best_detection = detections[best_idx:best_idx+1]  # keep batch dim
-
-            # --- Stage 2: hand landmark inference ---------------------------
-            xc, yc, scale_roi, theta = palm_detector.detection2roi(best_detection)
-            roi_imgs, roi_affines, roi_points = hand_landmark.extract_roi(
-                frame_rgb, xc, yc, theta, scale_roi
-            )
-            flags, landmarks, handedness = hand_landmark.predict(roi_imgs)
-
-            # landmarks shape: (1, 21, 3) — take first item
-            lm   = landmarks[0]    # (21, 3), normalized [0, 1]
-            flag = float(flags[0])
-            hand = float(handedness[0])
-
-            with state_lock:
-                shared_state["landmarks"]  = lm
-                shared_state["handedness"] = hand
-                shared_state["timestamp"]  = time.monotonic()
 
             if DEBUG_KEYPOINTS:
-                _print_landmarks(lm, flag, hand)
-                preview = _draw_landmarks(frame, lm, flag, hand)
-                cv2.imshow("Dia — hand landmarks", preview)
+                cv2.imshow("Dia - hand landmarks", display)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
