@@ -84,13 +84,12 @@ _HAND_CONNECTIONS = [
 ]
 
 
-def _draw_landmarks(frame_bgr, landmarks, flags, handedness):
-    """Draw hand skeleton and landmark points onto a copy of the frame."""
+def _draw_landmarks(frame_bgr, landmarks_px, flags, handedness):
+    """Draw hand skeleton onto frame. landmarks_px must be in frame pixel coords."""
     out = frame_bgr.copy()
-    h, w = out.shape[:2]
     hand_side = "left" if handedness > 0.5 else "right"
 
-    pts = [(int(lm[0] * w), int(lm[1] * h)) for lm in landmarks]
+    pts = [(int(lm[0]), int(lm[1])) for lm in landmarks_px]
 
     # Draw skeleton
     for a, b in _HAND_CONNECTIONS:
@@ -197,9 +196,9 @@ def main():
                     )
                     flags, landmarks, handedness = hand_landmark.predict(roi_imgs)
 
-                    lm   = landmarks[0]
-                    flag = float(flags[0])
-                    hand = float(handedness[0])
+                    lm   = landmarks[0].copy()   # normalized [0,1] — kept for gesture logic
+                    flag = float(flags[0].flat[0])
+                    hand = float(handedness[0].flat[0])
 
                     with state_lock:
                         shared_state["landmarks"]  = lm
@@ -208,7 +207,10 @@ def main():
 
                     if DEBUG_KEYPOINTS:
                         _print_landmarks(lm, flag, hand)
-                        display = _draw_landmarks(frame, lm, flag, hand)
+                        lm_px = hand_landmark.denormalize_landmarks(
+                            landmarks.copy(), roi_affines
+                        )[0]
+                        display = _draw_landmarks(frame, lm_px, flag, hand)
                 else:
                     with state_lock:
                         shared_state["landmarks"] = None
